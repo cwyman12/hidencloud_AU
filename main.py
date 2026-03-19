@@ -11,7 +11,7 @@ import re
 import requests
 import cloudscraper
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, unquote
 
 # ================= 配置常量 =================
 RENEW_DAYS = 7
@@ -145,14 +145,8 @@ class HidenCloudBot:
     def __init__(self, env_cookie, index):
         self.index = index + 1
         self.base_url = "https://dash.hidencloud.com"
-
-        self.session = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'desktop': True
-            }
-        )
+        self.env_cookie = env_cookie
+        self.session = self.create_session()
 
         self.csrf_token = ""
         self.services = []
@@ -171,6 +165,15 @@ class HidenCloudBot:
 
     def log(self, msg):
         log_print(f"[账号 {self.index}] {msg}")
+
+    def create_session(self):
+        return cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
 
     def load_cookie_str(self, cookie_str):
         if not cookie_str:
@@ -193,6 +196,25 @@ class HidenCloudBot:
         self.session.cookies.clear()
         self.load_cookie_str(env_cookie)
         self.log("切换回环境变量原始 Cookie 重试...")
+
+    def rebuild_session(self, cookie_str=None):
+        self.session = self.create_session()
+        self.csrf_token = ""
+        if cookie_str:
+            self.load_cookie_str(cookie_str)
+
+    def rebuild_session_and_reinit(self):
+        current_cookie = self.get_cookie_str()
+        self.log("♻️ 重建会话并重新验证登录状态...")
+        self.rebuild_session(current_cookie)
+
+        if self.init():
+            return True
+
+        self.log("⚠️ 当前 Cookie 重建会话后初始化失败，回退环境变量 Cookie 再试一次...")
+        self.rebuild_session()
+        self.load_cookie_str(self.env_cookie)
+        return self.init()
 
     def request(self, method, url, data=None, headers=None):
         full_url = urljoin(self.base_url, url)
@@ -285,12 +307,19 @@ class HidenCloudBot:
         payload['days'] = RENEW_DAYS
 
         target_url = action_url or self.normalize_url(f"/service/{service_id}/renew")
+        xsrf_cookie = (
+            self.session.cookies.get('XSRF-TOKEN')
+            or self.session.cookies.get('XSRF_TOKEN')
+            or self.session.cookies.get('csrf_token')
+        )
         headers = {
             'X-CSRF-TOKEN': self.csrf_token,
             'Referer': referer_url,
             'Origin': self.base_url,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
         }
+        if xsrf_cookie:
+            headers['X-XSRF-TOKEN'] = unquote(xsrf_cookie)
         return self.request('POST', target_url, data=payload, headers=headers)
 
     def try_handle_invoice_from_response(self, service_id, response, allow_invoice_poll=True):
@@ -352,8 +381,9 @@ class HidenCloudBot:
             self.log(f"❌ 初始化异常: {e}")
             return False
 
-    def process_service(self, service):
-        sleep_random(2000, 4000)
+    def process_service(self, service, allow_rebuild_retry=True, skip_initial_delay=False):
+        if not skip_initial_delay:
+            sleep_random(2000, 4000)
         self.log(f">>> 处理服务 ID: {service['id']}")
 
         try:
@@ -397,7 +427,14 @@ class HidenCloudBot:
                 res = self.submit_renew_request(service['id'], soup, manage_res.url)
 
             # ================== 5. 结果校验与支付 ==================
-            self.try_handle_invoice_from_response(service['id'], res)
+            handled = self.try_handle_invoice_from_response(service['id'], res)
+
+            if not handled and allow_rebuild_retry and res.status_code == 419:
+                self.log("♻️ 当前会话内续期仍失败，模拟重跑 Job：重建会话后完整重试当前服务一次...")
+                if self.rebuild_session_and_reinit():
+                    self.process_service(service, allow_rebuild_retry=False, skip_initial_delay=True)
+                else:
+                    self.log("❌ 重建会话后仍无法重新登录，放弃本服务本轮续期")
 
         except Exception as e:
             self.log(f"处理异常: {e}")

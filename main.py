@@ -154,6 +154,8 @@ class HidenCloudBot:
         self.processed_invoices = set()
         # 本轮运行中已确认当前页面不可支付的账单，避免每个服务重复打开
         self.non_payable_invoices = set()
+        # 标记本账号本轮是否建议由 GitHub Actions 稍后重跑一次
+        self.retry_needed = False
 
         cached_data = CacheManager.load()
         cached_cookie = cached_data.get(str(index))
@@ -167,6 +169,11 @@ class HidenCloudBot:
 
     def log(self, msg):
         log_print(f"[账号 {self.index}] {msg}")
+
+    def mark_retry_needed(self, reason):
+        self.retry_needed = True
+        if reason:
+            self.log(f"🔁 标记本轮任务需要重试: {reason}")
 
     def create_session(self):
         return cloudscraper.create_scraper(
@@ -501,9 +508,13 @@ class HidenCloudBot:
                     self.process_service(service, allow_rebuild_retry=False, skip_initial_delay=True)
                 else:
                     self.log("❌ 重建会话后仍无法重新登录，放弃本服务本轮续期")
+                    self.mark_retry_needed(f"服务 {service['id']} 重建会话后仍无法完成续期")
+            elif not handled:
+                self.mark_retry_needed(f"服务 {service['id']} 本轮续期未完成")
 
         except Exception as e:
             self.log(f"处理异常: {e}")
+            self.mark_retry_needed(f"服务 {service['id']} 处理异常")
         finally:
             # 每处理完一个服务保存一次 Cookie，而非每次请求都上传
             self.save_cookies(upload=True)
@@ -540,6 +551,7 @@ class HidenCloudBot:
 
             except Exception as e:
                 self.log(f"查账单出错: {e}")
+                self.mark_retry_needed(f"服务 {service_id} 查询账单异常")
                 return False
 
     def pay_single_invoice(self, url):
@@ -550,6 +562,7 @@ class HidenCloudBot:
             self.perform_pay_from_html(res.text, normalized_url)
         except Exception as e:
             self.log(f"访问账单失败: {e}")
+            self.mark_retry_needed("账单页面访问失败")
 
     def perform_pay_from_html(self, html_content, current_url):
         normalized_current_url = self.normalize_url(current_url)
@@ -596,6 +609,7 @@ class HidenCloudBot:
                 self.log(f"⚪ 账单页面未显示未支付/支付入口，视为本轮不可支付并跳过: {normalized_current_url}")
             else:
                 self.log(f"⚠️ 未找到可用的支付表单，可能页面结构变更。标题: {page_title}")
+                self.mark_retry_needed(f"账单 {normalized_current_url} 页面结构疑似变更")
             return
 
         payload = {}
@@ -616,18 +630,21 @@ class HidenCloudBot:
                 self.processed_invoices.add(normalized_current_url)
             else:
                 self.log(f"⚠️ 支付响应: {res.status_code}")
+                self.mark_retry_needed(f"账单 {normalized_current_url} 支付响应异常")
         except Exception as e:
             self.log(f"❌ 支付失败: {e}")
+            self.mark_retry_needed(f"账单 {normalized_current_url} 支付异常")
 
 # ================= 主程序 =================
 if __name__ == '__main__':
     env_cookies = os.environ.get("HIDEN_COOKIE", "")
     cookies_list = re.split(r'[&\n]', env_cookies)
     cookies_list = [c for c in cookies_list if c.strip()]
+    any_retry_needed = False
 
     if not cookies_list:
         log_print("❌ 未配置环境变量 HIDEN_COOKIE")
-        sys.exit(0)
+        sys.exit(1)
 
     WebDavManager().download()
 
@@ -646,6 +663,10 @@ if __name__ == '__main__':
                 bot.process_service(service)
         else:
             log_print(f"账号 {i + 1}: 登录失败，请检查 Cookie")
+            bot.mark_retry_needed("账号初始化失败")
+
+        if bot.retry_needed:
+            any_retry_needed = True
 
         log_print("\n----------------------------------------\n")
         if i < len(cookies_list) - 1:
@@ -654,3 +675,9 @@ if __name__ == '__main__':
     final_content = "\n".join(ALL_LOGS)
     if final_content:
         send_notify("HidenCloud 续期报告", final_content)
+
+    if any_retry_needed:
+        log_print("🔁 本轮存在可重试失败，脚本将返回退出码 1，供 GitHub Actions 延时再跑一次")
+        sys.exit(1)
+
+    sys.exit(0)

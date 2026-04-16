@@ -785,7 +785,7 @@ if __name__ == '__main__':
 
     final_content = "\n".join(ALL_LOGS)
     if final_content:
-        send_notify("HidenCloud 续期报告", final_content)
+        send_notify("HidenCloud (AU) 续期报告", final_content)
 
     if any_retry_needed:
         log_print("🔁 本轮存在可重试失败，脚本将返回退出码 1，供 GitHub Actions 延时再跑一次")

@@ -3,7 +3,7 @@ name: Auto Renew HidenCloud
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 23 * * 0' # 根据到期时间的前一天推算星期几来续期，最后一个数字代表星期
+    - cron: '0 3 * * 6' # 根据到期时间的前一天推算星期几来续期，最后一个数字代表星期
 
 permissions:
   contents: write
@@ -16,14 +16,14 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           persist-credentials: true
 
 
       - name: ⚙ 设置 Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.13'
 
